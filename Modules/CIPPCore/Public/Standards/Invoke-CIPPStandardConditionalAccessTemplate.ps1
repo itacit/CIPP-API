@@ -39,10 +39,9 @@ function Invoke-CIPPStandardConditionalAccessTemplate {
     $TestP2 = Test-CIPPStandardLicense -StandardName 'ConditionalAccessTemplate_p2' -TenantFilter $Tenant -RequiredCapabilities @('AAD_PREMIUM_P2') -SkipLog
     if ($TestResult -eq $false) {
         #writing to each item that the license is not present.
-        $settings.TemplateList | ForEach-Object {
-            Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($_.value)" -FieldValue 'This tenant does not have the required license for this standard.' -Tenant $Tenant
+        foreach ($Template in $settings.TemplateList) {
+            Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Template.value)" -FieldValue 'This tenant does not have the required license for this standard.' -Tenant $Tenant
         }
-        Write-Host "We're exiting as the correct license is not present for this standard."
         return $true
     } #we're done.
 
@@ -105,12 +104,22 @@ function Invoke-CIPPStandardConditionalAccessTemplate {
                     Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Setting.value)" -FieldValue "Policy $($Setting.label) is missing from this tenant." -Tenant $Tenant
                 }
             } else {
-                $CompareObj = ConvertFrom-Json -ErrorAction SilentlyContinue -InputObject (New-CIPPCATemplate -TenantFilter $tenant -JSON $CheckExististing)
-                $Compare = Compare-CIPPIntuneObject -ReferenceObject $policy -DifferenceObject $CompareObj
+                $templateResult = New-CIPPCATemplate -TenantFilter $tenant -JSON $CheckExististing
+                $CompareObj = ConvertFrom-Json -ErrorAction SilentlyContinue -InputObject $templateResult
+                try {
+                    $Compare = Compare-CIPPIntuneObject -ReferenceObject $policy -DifferenceObject $CompareObj -CompareType 'ca'
+                } catch {
+                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Error comparing CA policy: $($_.Exception.Message)" -sev Error
+                    Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Setting.value)" -FieldValue "Error comparing policy: $($_.Exception.Message)" -Tenant $Tenant
+                    continue
+                }
                 if (!$Compare) {
                     Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Setting.value)" -FieldValue $true -Tenant $Tenant
                 } else {
-                    Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Setting.value)" -FieldValue $Compare -Tenant $Tenant
+                    #this can still be prettified but is for later.
+                    $ExpectedValue = @{ 'Differences' = @() }
+                    $CurrentValue = @{ 'Differences' = $Compare }
+                    Set-CIPPStandardsCompareField -FieldName "standards.ConditionalAccessTemplate.$($Setting.value)" -CurrentValue $CurrentValue -ExpectedValue $ExpectedValue -Tenant $Tenant
                 }
             }
         }
