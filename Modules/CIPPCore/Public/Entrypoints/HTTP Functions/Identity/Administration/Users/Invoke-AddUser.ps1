@@ -61,7 +61,11 @@ function Invoke-AddUser {
             $body = [pscustomobject] @{
                 'Results'  = @(
                     $CreationResults.Results[0],
-                    $CreationResults.Results[1],
+                    @{
+                        'resultText' = $CreationResults.Results[1]
+                        'copyField'  = $CreationResults.Username
+                        'state'      = 'success'
+                    },
                     @{
                         'resultText' = $CreationResults.Results[2]
                         'copyField'  = $CreationResults.password
@@ -75,8 +79,10 @@ function Invoke-AddUser {
                 'User'     = $CreationResults.User
             }
         } catch {
+            $ErrorMessage = $_.TargetObject.Results -join ' '
+            $ErrorMessage = [string]::IsNullOrWhiteSpace($ErrorMessage) ? $_.Exception.Message : $ErrorMessage
             $body = [pscustomobject] @{
-                'Results' = @("$($_.Exception.Message)")
+                'Results' = @($ErrorMessage)
             }
             $StatusCode = [HttpStatusCode]::InternalServerError
         }
