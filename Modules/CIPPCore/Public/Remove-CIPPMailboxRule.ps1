@@ -8,6 +8,7 @@ function Remove-CIPPMailboxRule {
         $Headers,
         $RuleId,
         $RuleName,
+        $MailboxObjectId,
         [switch]$RemoveAllRules
     )
 
@@ -38,15 +39,21 @@ function Remove-CIPPMailboxRule {
     } else {
         # Only delete 1 rule
         try {
-            $null = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Remove-InboxRule' -Anchor $Username -cmdParams @{Identity = $RuleId }
-            $Message = "Successfully deleted mailbox rule $($RuleName) for $($Username)"
-            Write-LogMessage -headers $Headers -API $APIName -message "Deleted mailbox rule $($RuleName) for $($Username)" -Sev 'Info' -tenant $TenantFilter
+            try {
+                $null = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Remove-InboxRule' -Anchor $Username -cmdParams @{Identity = $RuleId }
+                $Message = "Successfully deleted mailbox rule $($RuleName) for $($Username)"
+                Write-LogMessage -headers $Headers -API $APIName -message "Deleted mailbox rule $($RuleName) for $($Username)" -Sev 'Info' -tenant $TenantFilter
+            } catch {
+                $null = New-ExoRequest -tenantid $TenantFilter -cmdlet 'Remove-InboxRule' -Anchor $MailboxObjectId -cmdParams @{Identity = $RuleId }
+                $Message = "Successfully deleted mailbox rule $($RuleName) for $($Username)"
+                Write-LogMessage -headers $Headers -API $APIName -message "Deleted mailbox rule $($RuleName) for $($Username)" -Sev 'Info' -tenant $TenantFilter
+            }
 
             # Remove from cache if it exists
             try {
                 Remove-CIPPDbItem -TenantFilter $TenantFilter -Type 'MailboxRules' -ItemId $RuleId
             } catch {
-                Write-LogMessage -headers $Headers -API $APIName -message "Rule deleted but failed to remove from cache: $($_.Exception.Message)" -sev 'Warn' -tenant $TenantFilter
+                Write-LogMessage -headers $Headers -API $APIName -message "Rule deleted but failed to remove from cache: $($_.Exception.Message)" -sev 'Warning' -tenant $TenantFilter
             }
 
             return $Message
