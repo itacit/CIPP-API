@@ -153,7 +153,7 @@ function Invoke-ListRooms {
                         mailNickname                  = $Room.Alias
                         accountDisabled               = $Room.AccountDisabled
                         hiddenFromAddressListsEnabled = $Room.HiddenFromAddressListsEnabled
-                        isDirSynced                   = $RoomMailbox.IsDirSynced
+                        isDirSynced                   = $Room.IsDirSynced
 
                         # Room Booking Settings
                         bookingType                   = $PlaceDetails.BookingType
@@ -190,7 +190,7 @@ function Invoke-ListRooms {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
 

@@ -12,11 +12,11 @@ function Invoke-ListMailboxForwarding {
 
     $APIName = $Request.Params.CIPPEndpoint
     $TenantFilter = $Request.Query.tenantFilter
-    $UseReportDB = $Request.Query.UseReportDB
-
+    # Serve from the reporting database cache instead of live Graph. Much faster, especially for AllTenants.
+    $UseReportDB = $Request.Query.UseReportDB -eq $true
     try {
         # If UseReportDB is specified, retrieve from report database
-        if ($UseReportDB -eq 'true') {
+        if ($UseReportDB) {
             try {
                 $GraphRequest = Get-CIPPMailboxForwardingReport -TenantFilter $TenantFilter
                 $StatusCode = [HttpStatusCode]::OK
@@ -84,7 +84,7 @@ function Invoke-ListMailboxForwarding {
 
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $GraphRequest = $ErrorMessage
     }
 

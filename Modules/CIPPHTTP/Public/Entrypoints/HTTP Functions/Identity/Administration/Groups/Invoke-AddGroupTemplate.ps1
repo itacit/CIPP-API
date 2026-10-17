@@ -9,10 +9,10 @@ function Invoke-AddGroupTemplate {
     param($Request, $TriggerMetadata)
     $APIName = $Request.Params.CIPPEndpoint
     $GUID = $Request.Body.GUID ?? (New-Guid).GUID
+    if (!$Request.Body.displayName) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ Results = 'Group Template Creation failed: You must enter a displayname' } })
+    }
     try {
-        if (!$Request.Body.displayName) {
-            throw 'You must enter a displayname'
-        }
 
         # Normalize group type to match New-CIPPGroup expectations
         # Handle values from ListGroups calculatedGroupType and frontend form values
@@ -64,17 +64,19 @@ function Invoke-AddGroupTemplate {
             RowKey       = "$GUID"
             PartitionKey = 'GroupTemplate'
         }
-        Write-LogMessage -headers $Request.Headers -API $APINAME -message "Created Group template named $displayName with GUID $GUID" -Sev 'Debug'
+        Write-LogMessage -headers $Request.Headers -API $APINAME -tenant 'Global' -message "Created Group template named $displayName with GUID $GUID" -Sev 'Info'
 
         $body = [pscustomobject]@{'Results' = 'Successfully added template' }
+        $StatusCode = [HttpStatusCode]::OK
     } catch {
-        Write-LogMessage -headers $Request.Headers -API $APINAME -message "Group Template Creation failed: $($_.Exception.Message)" -Sev 'Error'
+        Write-LogMessage -headers $Request.Headers -API $APINAME -tenant 'Global' -message "Group Template Creation failed: $($_.Exception.Message)" -Sev 'Error'
         $body = [pscustomobject]@{'Results' = "Group Template Creation failed: $($_.Exception.Message)" }
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $body
         })
 

@@ -15,6 +15,7 @@ function Invoke-ExecGDAPInvite {
     $InviteId = $Request.Body.InviteId
     $Reference = $Request.Body.Reference
     $Table = Get-CIPPTable -TableName 'GDAPInvites'
+    $StatusCode = [HttpStatusCode]::OK
 
     # Extract technician from headers (same logic as Write-LogMessage)
     if ($Headers.'x-ms-client-principal-idp' -eq 'azureStaticWebApps' -or !$Headers.'x-ms-client-principal-idp') {
@@ -78,10 +79,10 @@ function Invoke-ExecGDAPInvite {
 
                     if ($NewRelationshipRequest.action -eq 'lockForApproval') {
                         $InviteUrl = "https://admin.microsoft.com/AdminPortal/Home#/partners/invitation/granularAdminRelationships/$($NewRelationship.id)"
-                        try {
-                            $Uri = ([System.Uri]$TriggerMetadata.Headers.Referer)
-                            $OnboardingUrl = $Uri.AbsoluteUri.Replace($Uri.PathAndQuery, "/tenant/gdap-management/onboarding/start?id=$($NewRelationship.id)")
-                        } catch {
+                        $Hostname = Get-CIPPHostname -Headers $Headers -PreferCustomDomain
+                        if ($Hostname) {
+                            $OnboardingUrl = "https://$Hostname/tenant/gdap-management/onboarding/start?id=$($NewRelationship.id)"
+                        } else {
                             $OnboardingUrl = $null
                         }
 
@@ -100,13 +101,14 @@ function Invoke-ExecGDAPInvite {
                         $Message = 'GDAP relationship invite created. Log in as a Global Admin in the new tenant to approve the invite.'
                     } else {
                         $Message = 'Error creating GDAP relationship request'
+                        $StatusCode = [HttpStatusCode]::InternalServerError
                     }
 
                     Write-LogMessage -headers $Request.Headers -API $APINAME -message "Created GDAP Invite - $InviteUrl" -Sev 'Info'
                 }
             } catch {
                 $Message = 'Error creating GDAP relationship, failed at step: ' + $Step
-                Write-Host "GDAP ERROR: $($_.InvocationInfo.PositionMessage)"
+                Write-Information "GDAP ERROR: on line $($_.InvocationInfo.PositionMessage) | $(($_ | ConvertTo-Json -Compress))"
 
                 if ($Step -eq 'Creating GDAP relationship' -and $_.Exception.Message -match 'The user (principal) does not have the required permissions to perform the specified action on the resource.') {
                     $Message = 'Error creating GDAP relationship, ensure that all users have MFA enabled and enforced without exception. Please see the Microsoft Partner Security Requirements documentation for more information. https://learn.microsoft.com/en-us/partner-center/security/partner-security-requirements'
@@ -115,6 +117,7 @@ function Invoke-ExecGDAPInvite {
                 }
 
                 Write-LogMessage -headers $Request.Headers -API $APINAME -tenant $env:TenantID -message $Message -Sev 'Error' -LogData (Get-CippException -Exception $_)
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
 
             $body = @{
@@ -137,6 +140,7 @@ function Invoke-ExecGDAPInvite {
                 $Message = 'Invite updated'
             } else {
                 $Message = 'Invite not found'
+                $StatusCode = [HttpStatusCode]::NotFound
             }
             $body = @{
                 Message = $Message
@@ -145,10 +149,11 @@ function Invoke-ExecGDAPInvite {
         'Delete' {
             $Invite = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'invite' and RowKey eq '$InviteId'"
             if ($Invite) {
-                Remove-AzDataTableEntity @Table -Entity $Invite
+                Remove-CIPPAzDataTableEntity @Table -Entity $Invite
                 $Message = 'Invite deleted'
             } else {
                 $Message = 'Invite not found'
+                $StatusCode = [HttpStatusCode]::NotFound
             }
             $body = @{
                 Message = $Message
@@ -157,7 +162,7 @@ function Invoke-ExecGDAPInvite {
 
     }
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = $body
         })
 }

@@ -26,11 +26,14 @@ function Invoke-ExecBulkRemoveSharingLinks {
         'All'       = @('Anonymous', 'External', 'Internal')
     }
 
+    if (-not $SiteUrl) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ 'Results' = 'SiteUrl is required.' } })
+    }
+    if (-not $ScopeClassifications.ContainsKey([string]$Scope)) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ 'Results' = "Invalid scope '$Scope'. Valid values: $($ScopeClassifications.Keys -join ', ')." } })
+    }
+
     try {
-        if (-not $SiteUrl) { throw 'SiteUrl is required.' }
-        if (-not $ScopeClassifications.ContainsKey([string]$Scope)) {
-            throw "Invalid scope '$Scope'. Valid values: $($ScopeClassifications.Keys -join ', ')."
-        }
         $Classifications = $ScopeClassifications[[string]$Scope]
 
         try {
@@ -54,27 +57,33 @@ function Invoke-ExecBulkRemoveSharingLinks {
 
         $Revoked = [System.Collections.Generic.List[string]]::new()
         $Failed = [System.Collections.Generic.List[string]]::new()
-        foreach ($Link in $Targets) {
-            try {
-                $null = New-GraphPostRequest -uri "https://graph.microsoft.com/v1.0/drives/$($Link.driveId)/items/$($Link.itemId)/permissions/$($Link.permissionId)" -tenantid $TenantFilter -type DELETE -asapp $true
-                $Revoked.Add("$($Link.fileName) ($($Link.classification))")
+
+        # Batch the DELETEs through Graph $batch (New-GraphBulkRequest, ~20 per request) instead of
+        # one sequential call per link - a heavily-shared site can have hundreds/thousands.
+        $BulkRequests = @(for ($i = 0; $i -lt $Targets.Count; $i++) {
+                $Link = $Targets[$i]
+                @{
+                    id     = "$i"
+                    method = 'DELETE'
+                    url    = "drives/$($Link.driveId)/items/$($Link.itemId)/permissions/$($Link.permissionId)"
+                }
+            })
+        $Responses = @(New-GraphBulkRequest -tenantid $TenantFilter -Requests $BulkRequests -asapp $true -Version 'v1.0')
+
+        foreach ($Response in $Responses) {
+            $Link = $Targets[[int]$Response.id]
+            $Status = [int]$Response.status
+            # 2xx = revoked; 404 = the link was already gone (treat as revoked). Either way, clean
+            # the reporting cache row so it does not linger.
+            if (($Status -ge 200 -and $Status -lt 300) -or $Status -eq 404) {
+                $Revoked.Add($(if ($Status -eq 404) { "$($Link.fileName) (already removed)" } else { "$($Link.fileName) ($($Link.classification))" }))
                 if ($Link.id) {
-                    try {
-                        Remove-CIPPDbItem -TenantFilter $TenantFilter -Type 'SharePointSharingLinks' -ItemId $Link.id
-                    } catch {
+                    try { Remove-CIPPDbItem -TenantFilter $TenantFilter -Type 'SharePointSharingLinks' -ItemId $Link.id } catch {
                         Write-Information "Revoked link but could not update reporting cache row $($Link.id): $($_.Exception.Message)"
                     }
                 }
-            } catch {
-                # A 404 means the link was already gone; treat as revoked and clean the cache row.
-                if ($_.Exception.Message -match 'itemNotFound|404') {
-                    $Revoked.Add("$($Link.fileName) (already removed)")
-                    if ($Link.id) {
-                        try { Remove-CIPPDbItem -TenantFilter $TenantFilter -Type 'SharePointSharingLinks' -ItemId $Link.id } catch {}
-                    }
-                } else {
-                    $Failed.Add("$($Link.fileName): $($_.Exception.Message)")
-                }
+            } else {
+                $Failed.Add("$($Link.fileName): $($Response.body.error.message ?? "status $Status")")
             }
         }
 
@@ -89,12 +98,12 @@ function Invoke-ExecBulkRemoveSharingLinks {
             throw $Results
         }
         Write-LogMessage -Headers $Headers -API $APIName -tenant $TenantFilter -message $Results -sev Info
-        $StatusCode = [HttpStatusCode]::OK
+        $StatusCode = Get-CippBulkStatusCode -Total $Targets.Count -Failed $Failed.Count
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         $Results = "Failed to bulk revoke sharing links on $($SiteUrl): $($ErrorMessage.NormalizedError)"
         Write-LogMessage -Headers $Headers -API $APIName -tenant $TenantFilter -message $Results -sev Error -LogData $ErrorMessage
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

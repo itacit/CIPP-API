@@ -21,13 +21,5 @@ function Get-CIPPAsyncDeployment {
     $SafeJobId = $JobId -replace "'", "''"
     $Rows = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq '$SafeJobId'"
 
-    @($Rows | ForEach-Object {
-            [PSCustomObject]@{
-                Name   = $_.RowKey
-                Source = $_.Source
-                Status = $_.Status
-                Steps  = @($_.Steps | ConvertFrom-Json)
-                Logs   = $_.Logs
-            }
-        })
+    @(foreach ($Row in $Rows) { ConvertTo-CIPPAsyncDeploymentRow -Row $Row })
 }

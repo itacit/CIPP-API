@@ -17,13 +17,15 @@ function Invoke-ListSiteRecycleBin {
     $ItemTypeNames = @{ 1 = 'File'; 2 = 'File Version'; 3 = 'List Item'; 4 = 'List'; 5 = 'Folder'; 6 = 'Folder'; 7 = 'Attachment'; 8 = 'List Item Version'; 10 = 'Web' }
     $ItemStateNames = @{ 1 = 'First Stage'; 2 = 'Second Stage' }
 
-    try {
-        if (-not $SiteUrl) { throw 'SiteUrl is required.' }
+    if (-not $SiteUrl) {
+        return ([HttpResponseContext]@{ StatusCode = [HttpStatusCode]::BadRequest; Body = @{ 'Results' = 'SiteUrl is required.' } })
+    }
 
-        $SharePointInfo = Get-SharePointAdminLink -Public $false -tenantFilter $TenantFilter
-        $Scope = "$($SharePointInfo.SharePointUrl)/.default"
-        $JsonAccept = @{ Accept = 'application/json;odata=nometadata' }
-        $BaseUri = "$($SiteUrl.TrimEnd('/'))/_api"
+    try {
+        $RestContext = Resolve-CIPPSharePointRestContext -TenantFilter $TenantFilter -SiteUrl $SiteUrl
+        $Scope = $RestContext.Scope
+        $JsonAccept = $RestContext.Headers
+        $BaseUri = $RestContext.BaseUri
 
         $Items = New-GraphGetRequest -uri "$BaseUri/site/RecycleBin?`$top=500&`$orderby=DeletedDate desc" -tenantid $TenantFilter -scope $Scope -extraHeaders $JsonAccept -UseCertificate -AsApp $true
 
@@ -44,7 +46,7 @@ function Invoke-ListSiteRecycleBin {
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         $Body = "Failed to list the recycle bin for $($SiteUrl): $($ErrorMessage.NormalizedError)"
-        $StatusCode = [HttpStatusCode]::BadRequest
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{

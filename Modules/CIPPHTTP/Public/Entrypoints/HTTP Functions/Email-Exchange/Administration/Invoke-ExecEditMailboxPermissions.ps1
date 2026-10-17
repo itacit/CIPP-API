@@ -13,10 +13,9 @@ function Invoke-ExecEditMailboxPermissions {
 
     $APIName = $Request.Params.CIPPEndpoint
     $Headers = $Request.Headers
-    Write-LogMessage -headers $Headers -API $APINAME-message 'Accessed this API' -Sev 'Debug'
     $Username = $request.body.userID
     $Tenantfilter = $request.body.tenantfilter
-    if ($username -eq $null) { exit }
+    if ($null -eq $username) { exit }
     $Results = [System.Collections.ArrayList]@()
 
     # Each request-body bucket maps to a (PermissionLevel, Action) pair. Delegate to

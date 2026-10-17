@@ -34,10 +34,10 @@ Function Invoke-ListSiteMembers {
 
         $Members = [System.Collections.Generic.List[object]]::new()
         try {
-            $SharePointInfo = Get-SharePointAdminLink -Public $false -tenantFilter $TenantFilter
-            $Scope = "$($SharePointInfo.SharePointUrl)/.default"
-            $JsonAccept = @{ Accept = 'application/json;odata=nometadata' }
-            $BaseUri = "$($SiteUrl.TrimEnd('/'))/_api"
+            $RestContext = Resolve-CIPPSharePointRestContext -TenantFilter $TenantFilter -SiteUrl $SiteUrl
+            $Scope = $RestContext.Scope
+            $JsonAccept = $RestContext.Headers
+            $BaseUri = $RestContext.BaseUri
 
             $RoleGroups = [ordered]@{
                 'Owners'   = 'associatedownergroup'
@@ -152,7 +152,7 @@ Function Invoke-ListSiteMembers {
         $StatusCode = [HttpStatusCode]::OK
         $Body = @($Members)
     } catch {
-        $StatusCode = [HttpStatusCode]::Forbidden
+        $StatusCode = [HttpStatusCode]::InternalServerError
         $Body = Get-NormalizedError -Message $_.Exception.Message
     }
 

@@ -32,19 +32,32 @@ function Invoke-ExecSharePointTemplate {
                     break
                 }
 
-                $GUID = $Request.Body.TemplateId ?? (New-Guid).GUID
+                # Frontend sends TemplateId only when editing (add.js). Create/copy omit it.
+                $GUID = $Request.Body.TemplateId
+                if ([string]::IsNullOrWhiteSpace([string]$GUID)) {
+                    $GUID = (New-Guid).GUID
+                    $Existing = $null
+                } else {
+                    $GUID = [string]$GUID
+                    $Existing = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'SharePointTemplate' and RowKey eq '$GUID'"
+                }
 
-                # Keep only the template payload; strip transport/metadata fields.
-                $TemplateObject = $Request.Body | Select-Object -Property * -ExcludeProperty Action, TemplateId
+                # Never trust client-supplied audit fields.
+                $TemplateObject = $Request.Body | Select-Object -Property * -ExcludeProperty Action, TemplateId, GUID, CreatedBy, CreatedOn, UpdatedBy, UpdatedOn
 
-                # Stamp audit metadata. CreatedBy/On only on first save, UpdatedBy/On on every save.
-                if (-not $Request.Body.TemplateId) {
+                if ($Existing) {
+                    $ExistingData = $Existing.JSON | ConvertFrom-Json
+                    $TemplateObject | Add-Member -NotePropertyName 'CreatedBy' -NotePropertyValue ($ExistingData.CreatedBy ?? $User.userDetails ?? 'CIPP-API') -Force
+                    $TemplateObject | Add-Member -NotePropertyName 'CreatedOn' -NotePropertyValue ($ExistingData.CreatedOn ?? (Get-Date).ToString('o')) -Force
+                } else {
                     $TemplateObject | Add-Member -NotePropertyName 'CreatedBy' -NotePropertyValue ($User.userDetails ?? 'CIPP-API') -Force
                     $TemplateObject | Add-Member -NotePropertyName 'CreatedOn' -NotePropertyValue (Get-Date).ToString('o') -Force
                 }
                 $TemplateObject | Add-Member -NotePropertyName 'UpdatedBy' -NotePropertyValue ($User.userDetails ?? 'CIPP-API') -Force
                 $TemplateObject | Add-Member -NotePropertyName 'UpdatedOn' -NotePropertyValue (Get-Date).ToString('o') -Force
                 $TemplateObject | Add-Member -NotePropertyName 'GUID' -NotePropertyValue $GUID -Force
+                # Always stamp the engine version this API understands; clients cannot omit or override.
+                $TemplateObject | Add-Member -NotePropertyName 'templateEngineVersion' -NotePropertyValue 1 -Force
 
                 $TemplateJson = $TemplateObject | ConvertTo-Json -Depth 10 -Compress
 
@@ -81,7 +94,7 @@ function Invoke-ExecSharePointTemplate {
 
                 if ($Template) {
                     $TemplateName = ($Template.JSON | ConvertFrom-Json).templateName
-                    $null = Remove-AzDataTableEntity @Table -Entity $Template -Force
+                    $null = Remove-CIPPAzDataTableEntity @Table -Entity $Template -Force
                     $Body = @{
                         'Results' = "Successfully deleted template '$TemplateName'"
                     }
@@ -90,6 +103,7 @@ function Invoke-ExecSharePointTemplate {
                     $Body = @{
                         'Results' = 'No template found with the provided ID'
                     }
+                    $StatusCode = [HttpStatusCode]::NotFound
                 }
             } catch {
                 $Body = @{
@@ -111,8 +125,10 @@ function Invoke-ExecSharePointTemplate {
             $Body = $Templates | ForEach-Object {
                 $TemplateData = $_.JSON | ConvertFrom-Json
                 $OutputObject = $TemplateData | Select-Object -Property *
-                $OutputObject | Add-Member -NotePropertyName 'TemplateId' -NotePropertyValue $_.RowKey -Force
-                $OutputObject | Add-Member -NotePropertyName 'Timestamp' -NotePropertyValue $_.Timestamp.DateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+                $OutputObject | Add-Member -NotePropertyMembers ([ordered]@{
+                        TemplateId = $_.RowKey
+                        Timestamp  = $_.Timestamp.DateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                    }) -Force
                 return $OutputObject
             }
         }
@@ -120,63 +136,86 @@ function Invoke-ExecSharePointTemplate {
             try {
                 $TemplateId = $Request.Body.TemplateId
                 $SiteOwner = $Request.Body.SiteOwner
-                $Template = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'SharePointTemplate' and RowKey eq '$TemplateId'"
-                if (-not $Template) { throw 'No template found with the provided ID' }
-                $TemplateData = $Template.JSON | ConvertFrom-Json
-                if (-not $SiteOwner) { throw 'A site/team owner is required to deploy this template.' }
-
-                # Expand AllTenants when selected in the drawer.
-                $Tenants = foreach ($Tenant in $Request.Body.selectedTenants) {
-                    if ($Tenant.defaultDomainName -eq 'AllTenants') {
-                        (Get-Tenants).defaultDomainName
-                    } else {
-                        $Tenant.defaultDomainName
-                    }
+                if (-not $SiteOwner) {
+                    $Body = @{ Results = 'Failed to queue template deployment: A site/team owner is required to deploy this template.' }
+                    $StatusCode = [HttpStatusCode]::BadRequest
+                    break
                 }
-                $Tenants = @($Tenants | Sort-Object -Unique)
 
-                # Pre-create a status row per tenant so the frontend can poll live progress
-                # (GDAP-onboarding style) from the moment the deployment is queued.
-                $JobId = New-CIPPAsyncDeployment -Names $Tenants -StepTitles @(@($TemplateData.siteTemplates) | ForEach-Object { $_.displayName }) -Source 'SharePointTemplate'
+                $TenantFilter = $Request.Body.tenantFilter
+                if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
+                    $Body = @{ Results = 'Failed to queue template deployment: A tenant is required to deploy this template.' }
+                    $StatusCode = [HttpStatusCode]::BadRequest
+                    break
+                }
+
+                # AnyTenant: deployment provisions sites in this tenant; enforce scope
+                try {
+                    $AllowedTenants = Test-CIPPAccess -Request $Request -TenantList
+                } catch {
+                    $Body = @{ Results = "Failed to queue template deployment: $($_.Exception.Message)" }
+                    $StatusCode = [HttpStatusCode]::Forbidden
+                    break
+                }
+                if ($AllowedTenants -notcontains 'AllTenants' -and -not (Get-Tenants -TenantFilter $TenantFilter)) {
+                    $Body = @{ Results = 'Failed to queue template deployment: Access to this tenant is not allowed' }
+                    $StatusCode = [HttpStatusCode]::Forbidden
+                    break
+                }
+
+                $Template = Get-CIPPAzDataTableEntity @Table -Filter "PartitionKey eq 'SharePointTemplate' and RowKey eq '$TemplateId'"
+                if (-not $Template) {
+                    $Body = @{ Results = 'Failed to queue template deployment: No template found with the provided ID' }
+                    $StatusCode = [HttpStatusCode]::NotFound
+                    break
+                }
+                $TemplateData = $Template.JSON | ConvertFrom-Json
+
+                # Pre-create a status row so the frontend can poll live progress from queue time.
+                $JobId = New-CIPPAsyncDeployment -Names @($TenantFilter) -StepTitles @(@($TemplateData.siteTemplates) | ForEach-Object { $_.displayName }) -Source 'SharePointTemplate'
 
                 # Site and Team provisioning is slow (Teams sites can take a minute each), so the
-                # actual work runs per tenant on the durable queue instead of in this request.
-                $Queue = New-CippQueueEntry -Name "SharePoint Template - $($TemplateData.templateName)" -TotalTasks $Tenants.Count
-                $Batch = foreach ($TenantFilter in $Tenants) {
-                    [pscustomobject]@{
-                        FunctionName = 'ExecSharePointTemplateDeploy'
-                        Tenant       = $TenantFilter
-                        TemplateId   = $TemplateId
-                        SiteOwner    = $SiteOwner
-                        DeploymentId = $JobId
-                        QueueId      = $Queue.RowKey
-                    }
-                }
+                # actual work runs on the durable queue instead of in this request.
+                $Queue = New-CippQueueEntry -Name "SharePoint Template - $($TemplateData.templateName)" -TotalTasks 1
                 $InputObject = @{
                     OrchestratorName = 'SharePointTemplateOrchestrator'
-                    Batch            = @($Batch)
+                    Batch            = @(
+                        [pscustomobject]@{
+                            FunctionName = 'ExecSharePointTemplateDeploy'
+                            Tenant       = $TenantFilter
+                            TemplateId   = $TemplateId
+                            SiteOwner    = $SiteOwner
+                            DeploymentId = $JobId
+                            QueueId      = $Queue.RowKey
+                        }
+                    )
                     SkipLog          = $true
                 }
                 $null = Start-CIPPOrchestrator -InputObject $InputObject
 
                 $Body = @{
-                    Results      = "Deployment of template '$($TemplateData.templateName)' queued for $($Tenants.Count) tenant(s)."
+                    Results      = "Deployment of template '$($TemplateData.templateName)' queued for $TenantFilter."
                     DeploymentId = $JobId
                 }
-                Write-LogMessage -headers $Headers -API $APIName -message "Queued SharePoint template deployment '$($TemplateData.templateName)' for $($Tenants.Count) tenant(s)" -Sev 'Info'
+                Write-LogMessage -headers $Headers -API $APIName -message "Queued SharePoint template deployment '$($TemplateData.templateName)' for $TenantFilter" -Sev 'Info'
             } catch {
                 $Body = @{ Results = "Failed to queue template deployment: $($_.Exception.Message)" }
-                $StatusCode = [HttpStatusCode]::BadRequest
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         'DeployStatus' {
             try {
                 $JobId = $Request.Query.DeploymentId ?? $Request.Body.DeploymentId
-                if (-not $JobId) { throw 'DeploymentId is required' }
+                if (-not $JobId) {
+                    $Body = @{ Results = 'Failed to get deployment status: DeploymentId is required' }
+                    $StatusCode = [HttpStatusCode]::BadRequest
+                    break
+                }
                 $Body = @(Get-CIPPAsyncDeployment -JobId $JobId)
+                Add-CIPPRealtimeWatch -JobId $JobId
             } catch {
                 $Body = @{ Results = "Failed to get deployment status: $($_.Exception.Message)" }
-                $StatusCode = [HttpStatusCode]::BadRequest
+                $StatusCode = [HttpStatusCode]::InternalServerError
             }
         }
         default {
@@ -186,8 +225,10 @@ function Invoke-ExecSharePointTemplate {
             $Body = $Templates | ForEach-Object {
                 $TemplateData = $_.JSON | ConvertFrom-Json
                 $OutputObject = $TemplateData | Select-Object -Property *
-                $OutputObject | Add-Member -NotePropertyName 'TemplateId' -NotePropertyValue $_.RowKey -Force
-                $OutputObject | Add-Member -NotePropertyName 'Timestamp' -NotePropertyValue $_.Timestamp.DateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+                $OutputObject | Add-Member -NotePropertyMembers ([ordered]@{
+                        TemplateId = $_.RowKey
+                        Timestamp  = $_.Timestamp.DateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                    }) -Force
                 return $OutputObject
             }
         }

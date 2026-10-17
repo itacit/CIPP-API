@@ -15,6 +15,7 @@ function Invoke-ListSharePointTemplates {
 
     $Table = Get-CIPPTable -TableName 'templates'
 
+    $StatusCode = [HttpStatusCode]::OK
     try {
         $Filter = "PartitionKey eq 'SharePointTemplate'"
         $Templates = Get-CIPPAzDataTableEntity @Table -Filter $Filter
@@ -40,8 +41,10 @@ function Invoke-ListSharePointTemplates {
                 # Surface scalar counts so the list can show/sort them without inspecting the nested arrays.
                 $SiteTemplates = @($TemplateData.siteTemplates | Where-Object { $_ })
                 $LibraryCount = ($SiteTemplates | ForEach-Object { @($_.libraries | Where-Object { $_ }).Count } | Measure-Object -Sum).Sum
-                $TemplateObject | Add-Member -NotePropertyName 'SiteTemplateCount' -NotePropertyValue ([int]$SiteTemplates.Count) -Force
-                $TemplateObject | Add-Member -NotePropertyName 'LibraryCount' -NotePropertyValue ([int]$LibraryCount) -Force
+                $TemplateObject | Add-Member -NotePropertyMembers ([ordered]@{
+                        SiteTemplateCount = ([int]$SiteTemplates.Count)
+                        LibraryCount      = ([int]$LibraryCount)
+                    }) -Force
 
                 return $TemplateObject
             } catch {
@@ -58,10 +61,11 @@ function Invoke-ListSharePointTemplates {
         $Body = @{
             Results = "Failed to list SharePoint templates: $($_.Exception.Message)"
         }
+        $StatusCode = [HttpStatusCode]::InternalServerError
     }
 
     return ([HttpResponseContext]@{
-            StatusCode = [HttpStatusCode]::OK
+            StatusCode = $StatusCode
             Body       = ConvertTo-Json -Depth 10 -InputObject @($Body)
         })
 }
